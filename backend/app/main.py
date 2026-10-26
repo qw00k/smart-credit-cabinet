@@ -3,17 +3,41 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from typing import List
 
-from app.core.database import dvigatel, BazoviiKlass, poluchit_bd
+from app.core.database import dvigatel, BazoviiKlass, poluchit_bd, FabrikaSessii
 from app.models import models
 from app.schemas import schemas
 from app.services import scoring, ocr_service, ai_service
 
 BazoviiKlass.metadata.create_all(bind=dvigatel)
+
 prilozhenie = FastAPI(title="Smart Credit Cabinet API")
-prilozhenie.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+prilozhenie.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@prilozhenie.on_event("startup")
+def avtozapolnenie_pri_starte():
+    bd = FabrikaSessii()
+    try:
+        if bd.query(models.KreditnyiProdukt).count() == 0:
+            bd.add_all([
+                models.KreditnyiProdukt(nazvanie="Oborotnyi kredit", stavka=18.0, min_summa=100000, max_summa=3000000),
+                models.KreditnyiProdukt(nazvanie="Investicionnyi", stavka=15.5, min_summa=500000, max_summa=5000000),
+                models.KreditnyiProdukt(nazvanie="Mikrokredit", stavka=22.0, min_summa=50000, max_summa=500000),
+            ])
+            bd.commit()
+            print("=== База данных успешно заполнена при старте ===")
+    finally:
+        bd.close()
+
 
 @prilozhenie.get("/")
-def koren(): return {"message": "Backend is running"}
+def koren():
+    return {"message": "Backend is running"}
 
 @prilozhenie.post("/api/profiles/", response_model=schemas.ProfilOtv)
 def sozdat_profil(profil: schemas.SozdatProfil, bd: Session = Depends(poluchit_bd)):
@@ -23,7 +47,13 @@ def sozdat_profil(profil: schemas.SozdatProfil, bd: Session = Depends(poluchit_b
 
 @prilozhenie.post("/api/applications/", response_model=schemas.ZayavkaOtv)
 def sozdat_zayavku(dannye: schemas.SozdatZayavku, bd: Session = Depends(poluchit_bd)):
-    zayavka = models.Zayavka(profil_id=dannye.profil_id, produkt_id=dannye.produkt_id, zaproshennaya_summa=dannye.zaproshennaya_summa, srok_mesyacev=dannye.srok_mesyacev, status="pending")
+    zayavka = models.Zayavka(
+        profil_id=dannye.profil_id, 
+        produkt_id=dannye.produkt_id, 
+        zaproshennaya_summa=dannye.zaproshennaya_summa, 
+        srok_mesyacev=dannye.srok_mesyacev, 
+        status="pending"
+    )
     bd.add(zayavka); bd.commit(); bd.refresh(zayavka)
     bd.add(models.ZhurnalDeistvii(zayavka_id=zayavka.id, deistvie="created")); bd.commit()
     return zayavka
@@ -55,7 +85,11 @@ def rekomendacii(profil_id: int, bd: Session = Depends(poluchit_bd)):
     bezopasnaya = scoring.poschitat_bezopasnuyu_summu(profil.vyruchka, profil.rashody, profil.dolgi)
     ball = scoring.poschitat_ball(profil)
     rekomendovannye = scoring.podobrat_produkty(profil, produkty)
-    return {"bezopasnaya_summa": bezopasnaya, "ball": ball, "produkty": [{"id": p.id, "nazvanie": p.nazvanie, "stavka": p.stavka} for p in rekomendovannye]}
+    return {
+        "bezopasnaya_summa": bezopasnaya, 
+        "ball": ball, 
+        "produkty": [{"id": p.id, "nazvanie": p.nazvanie, "stavka": p.stavka} for p in rekomendovannye]
+    }
 
 @prilozhenie.post("/api/ocr/")
 async def zagruzit_dokument(fail: UploadFile = File(...)):
